@@ -1,0 +1,219 @@
+﻿Sub Main()
+
+    'Pre Rule Checks
+    If ThisApplication.ActiveDocument.DocumentType <> kAssemblyDocumentObject Then
+        MessageBox.Show("Proszę uruchomić tę regułę z pliku złożenia.", "iLogic")
+        Exit Sub
+    End If
+    '/Pre Rule Checks
+
+    RUsure = MessageBox.Show( _
+        "Spowoduje to utworzenie pliku STEP dla wszystkich komponentów złożenia, które są kształtownikiem" _
+        & vbLf & "To makro zakłada, że plik części jest zapisany." _
+        & vbLf & " " _
+        & vbLf & "Czy na pewno chcesz utworzyć plik STEP dla wszystkich komponentów złożenia?" _
+        & vbLf & "To może potrwać chwilę.", "iLogic - Export wszystkich plików STEP", MessageBoxButtons.YesNo)
+
+    If RUsure = vbNo Then
+        MakeSTEP = False
+    Else
+        MakeSTEP = True
+    End If
+
+    If MakeSTEP = False Then
+        Exit Sub
+    End If
+
+    Dim oAsmDoc As AssemblyDocument = ThisApplication.ActiveDocument
+    Dim oAssyDef As AssemblyComponentDefinition = oAsmDoc.ComponentDefinition
+    oAsmPathAndName = Left(oAsmDoc.FullFileName, Len(oAsmDoc.FullFileName) - 4)
+    oAsmDisplayName = System.IO.Path.GetFileNameWithoutExtension(oAsmDoc.FullFileName)
+    oPath = ThisDoc.Path
+
+    oFolder = "C:\TkMatik\DXF\" & oAsmDisplayName & ""
+    If Not System.IO.Directory.Exists(oFolder) Then
+        System.IO.Directory.CreateDirectory(oFolder)
+    End If
+    ' ensure subfolder exists
+    If Not System.IO.Directory.Exists(oFolder & "\STEPs\Profile") Then
+        System.IO.Directory.CreateDirectory(oFolder & "\STEPs\Profile")
+    End If
+
+    Dim oOccsEnum As ComponentOccurrencesEnumerator = oAsmDoc.ComponentDefinition.Occurrences.AllLeafOccurrences
+    Call ProcessLeafOccs(oOccsEnum)
+
+    MessageBox.Show("Nowe pliki utworzone w: " & vbLf & oFolder, "iLogic")
+    Shell("explorer.exe " & oFolder, vbNormalFocus)
+End Sub
+
+Dim oFolder As String
+Dim oContext As TranslationContext
+Dim oOptions As NameValueMap
+Dim oDatamedium As DataMedium
+Dim oPDFAddIn As TranslatorAddIn
+Dim MakeSTEP As Boolean
+
+Sub ProcessLeafOccs(oOccs As ComponentOccurrencesEnumerator)
+    For Each oOcc As ComponentOccurrence In oOccs
+        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kPartDocumentObject Then
+            If oOcc.Visible = True And oOcc.Suppressed = False Then
+                DXFsave(oOcc, "Parts only")
+            End If
+        End If
+    Next
+End Sub
+
+Sub DXFsave(oOcc As ComponentOccurrence, sTargetfolder As String)
+    Dim oOccCompDef As ComponentDefinition = oOcc.Definition
+    Dim oApp As Inventor.Application = ThisApplication
+
+    Dim oFileName As String
+    Dim oFullFileName As String
+    Dim iptPathName As String
+    Dim oPN As String
+    Dim UserName As String
+    Dim oDisplayName As String
+
+    oFileName = System.IO.Path.GetFileNameWithoutExtension(oOccCompDef.Document.FullFileName)
+    oFullFileName = System.IO.Path.GetFileName(oOccCompDef.Document.FullFileName)
+    iptPathName = oOccCompDef.Document.FullDocumentName
+    oPN = ThisDoc.FileName(False)
+
+    ' Открываем ОДИН раз как PartDocument, невидимо
+    Dim oDoc As PartDocument = Nothing
+    oDoc = oApp.Documents.Open(iptPathName, False) ' not visible
+
+    ' --- отныне работаем только с oDoc ---
+    Dim oType As String
+    oType = oDoc.DocumentSubType.DocumentSubTypeID
+
+    Dim CustomPropertySet As PropertySet
+    CustomPropertySet = oDoc.PropertySets.Item("Inventor User Defined Properties")
+
+    ' sprawdzamy, czy model bazowy jest konstrukcją blachową
+    Dim propmat As String
+    propmat = oDoc.ComponentDefinition.Material.Name
+    Dim Stoknum As String = iProperties.Value(oFullFileName, "Project", "Stock Number")
+
+    If oDoc.DocumentInterests.HasInterest("{AC211AE0-A7A5-4589-916D-81C529DA6D17}") = True Then
+        UserName = ThisApplication.GeneralOptions.UserName
+
+        Dim oData As DataMedium
+        oData = ThisApplication.TransientObjects.CreateDataMedium
+        oData.FileName = oFolder & "\STEPs\Profile\" & Left(oFileName, 9) & ".stp"
+
+        If Not (System.IO.File.Exists(oData.FileName)) Then
+
+            Dim oSTEPTranslator As TranslatorAddIn
+            oSTEPTranslator = ThisApplication.ApplicationAddIns.ItemById("{90AF7F40-0C01-11D5-8E83-0010B541CD80}")
+
+            oContext = ThisApplication.TransientObjects.CreateTranslationContext
+            oOptions = ThisApplication.TransientObjects.CreateNameValueMap
+
+            oDisplayName = oDoc.DisplayName
+            If oDisplayName <> "Reference Skeleton" Then
+
+                Dim partDef As PartComponentDefinition = oDoc.ComponentDefinition
+                Dim params As Parameters = partDef.Parameters
+
+                Dim GW As Double
+                Dim GOFF As Double
+
+                ' Параметры читаем ИЗ oDoc
+                Try
+                    GW = CDbl(params.Item("G_W").Value)
+                    GOFF = CDbl(params.Item("G_OFFSET_START").Value)
+                Catch
+                    ' нет параметров — закрыть и выйти
+                    oDoc.Close(False)
+                    Exit Sub
+                End Try
+
+                ' если твои параметры уже в мм — без конверта
+                Dim GW_mm As Double = GW
+                Dim GOFF_mm As Double = GOFF
+
+                Dim oOffset As Double = GW_mm / 2
+                Dim oOffsetStart As Double = GOFF_mm
+                If oOffsetStart < 0 Then
+                    oOffsetStart = Math.Abs(oOffsetStart)
+                End If
+
+                ' Рабочие плоскости берем из ЭТОГО документа
+                Dim oCompDef As ComponentDefinition = partDef
+
+                Dim oBasePlane As WorkPlane
+                Try
+                    oBasePlane = oCompDef.WorkPlanes.Item("Płaszczyzna YZ")
+                Catch
+                    oBasePlane = oCompDef.WorkPlanes.Item(3) ' 1=XY, 2=XZ, 3=YZ
+                End Try
+
+                Dim oNewPlane As WorkPlane
+                oNewPlane = oCompDef.WorkPlanes.AddByPlaneAndOffset(oBasePlane, oOffset)
+                oNewPlane.Visible = False
+
+                Dim oSketch As PlanarSketch
+                oSketch = oCompDef.Sketches.Add(oNewPlane)
+                oSketch.Edit()
+
+                Dim oTG As TransientGeometry = ThisApplication.TransientGeometry
+                Dim oPoint As Point2d = oTG.CreatePoint2d(-1.2, oOffsetStart + 1)
+
+                Dim oSketchText As Inventor.TextBox
+                oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Left(oFileName, 9))
+
+                oSketch.ExitEdit()
+                InventorVb.DocumentUpdate()
+
+                ' Профиль из всего эскиза
+                Dim oProf As Profile
+                Try
+                    oProf = oSketch.Profiles.AddForSolid(False)
+                Catch
+                    oDoc.Close(False)
+                    Exit Sub
+                End Try
+
+                ' Вырез
+                Dim uom As UnitsOfMeasure = oDoc.UnitsOfMeasure
+                Dim thicknessMM As Double = 0.02
+                Dim thickness As Double = uom.ConvertUnits(thicknessMM, UnitsTypeEnum.kMillimeterLengthUnits, uom.LengthUnits)
+
+                Dim op As PartFeatureOperationEnum = PartFeatureOperationEnum.kCutOperation
+
+                Dim oExtDef As ExtrudeDefinition
+                oExtDef = partDef.Features.ExtrudeFeatures.CreateExtrudeDefinition(oProf, op)
+                oExtDef.SetDistanceExtent(thickness, PartFeatureExtentDirectionEnum.kNegativeExtentDirection)
+
+                Dim oExtrude As ExtrudeFeature
+                oExtrude = partDef.Features.ExtrudeFeatures.Add(oExtDef)
+
+                ' Экспорт STEP
+                If oSTEPTranslator.HasSaveCopyAsOptions(oDoc, oContext, oOptions) Then
+                    oOptions.Value("ApplicationProtocolType") = 3
+                    oContext.Type = IOMechanismEnum.kFileBrowseIOMechanism
+                    oSTEPTranslator.SaveCopyAs(oDoc, oContext, oOptions, oData)
+                End If
+
+                ' >>> ОБЯЗАТЕЛЬНО закрываем
+                oDoc.Close(False)
+
+            Else
+                ' Reference Skeleton — просто закрыть
+                oDoc.Close(False)
+            End If
+
+        Else
+            ' STEP уже есть — закрыть документ и выйти
+            oDoc.Close(False)
+            Exit Sub
+        End If
+
+    Else
+        ' Не blacha — закрыть и выйти
+        oDoc.Close(False)
+        Exit Sub
+    End If
+
+End Sub
