@@ -1,4 +1,4 @@
-﻿Sub Main()
+Sub Main()
 
     'Pre Rule Checks
     If ThisApplication.ActiveDocument.DocumentType <> kAssemblyDocumentObject Then
@@ -118,17 +118,18 @@ Sub DXFsave(oOcc As ComponentOccurrence, sTargetfolder As String)
 
                 Dim GW As Double
                 Dim GOFF As Double
-
+				Dim GH As Double
                 ' Параметры читаем ИЗ oDoc
                 Try
                     GW = CDbl(params.Item("G_W").Value)
                     GOFF = CDbl(params.Item("G_OFFSET_START").Value)
+					GH = CDbl(params.Item("G_H").Value)
                 Catch
                     ' нет параметров — закрыть и выйти
                     oDoc.Close(False)
                     Exit Sub
                 End Try
-
+				
                 ' если твои параметры уже в мм — без конверта
                 Dim GW_mm As Double = GW
                 Dim GOFF_mm As Double = GOFF
@@ -158,10 +159,21 @@ Sub DXFsave(oOcc As ComponentOccurrence, sTargetfolder As String)
                 oSketch.Edit()
 
                 Dim oTG As TransientGeometry = ThisApplication.TransientGeometry
-                Dim oPoint As Point2d = oTG.CreatePoint2d(-1.2, oOffsetStart + 1)
-
+				Dim oPoint As Point2d
+				
+				If GH > 3 Then
+                	oPoint = oTG.CreatePoint2d(-1.2, oOffsetStart + 1)
+				Else
+					oPoint = oTG.CreatePoint2d(-0.8, oOffsetStart + 1)
+				End If	
+				
                 Dim oSketchText As Inventor.TextBox
-                oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Left(oFileName, 9))
+				
+				If GH > 3 Then
+                	oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Left(oFileName, 9))
+				Else
+					oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Mid(oFileName, 4, 6))
+				End If
 
                 oSketch.ExitEdit()
                 InventorVb.DocumentUpdate()
