@@ -1,0 +1,383 @@
+﻿Option Explicit
+Sub Main()
+
+    Dim doc As Document
+    doc = ThisApplication.ActiveDocument
+
+    If doc.DocumentType = kDrawingDocumentObject Then
+        MessageBox.Show("Makro nie działa dla rysunku (.idw/.dwg). Uruchom w części lub złożeniu.", "iLogic")
+        Exit Sub
+    End If
+
+    If doc.DocumentType <> kPartDocumentObject And doc.DocumentType <> kAssemblyDocumentObject Then
+        MessageBox.Show("Uruchom w części (.ipt) albo złożeniu (.iam).", "iLogic")
+        Exit Sub
+    End If
+
+    If doc.DocumentType = kPartDocumentObject Then
+
+        Dim partDoc As PartDocument
+        partDoc = CType(doc, PartDocument)
+
+        Dim nameNoExt As String
+        nameNoExt = System.IO.Path.GetFileNameWithoutExtension(partDoc.FullFileName)
+
+        Dim thumbName As String
+        thumbName = GetThumbNameForDoc_NoBarcodeForTK(partDoc, nameNoExt)
+
+        CurrentColorScheme = ThisApplication.ActiveColorScheme.Name
+        CurrentBackgroundType = ThisApplication.ColorSchemes.BackgroundType
+
+        If Not System.IO.Directory.Exists(OutFolder) Then
+            System.IO.Directory.CreateDirectory(OutFolder)
+        End If
+
+        ChangeToWhiteBackground()
+        SetDefaultLightingForActiveDoc()
+		
+		HideAuxiliaryGeometryForActiveDoc()
+
+        ThisApplication.CommandManager.ControlDefinitions.Item("AppViewCubeHomeCmd").Execute
+        ThisApplication.ActiveView.SaveAsBitmap(OutFolder & "\" & thumbName, 500, 500)
+
+        RestoreBackground(CurrentColorScheme, CurrentBackgroundType)
+
+        MessageBox.Show("Zapisano miniaturę:" & vbCrLf & OutFolder & "\" & thumbName, "iLogic")
+        Exit Sub
+    End If
+
+
+    Dim asmDoc As AssemblyDocument
+    asmDoc = CType(doc, AssemblyDocument)
+
+    Dim ans As DialogResult
+    ans = MessageBox.Show( _
+        "Makro utworzy miniatury JPG dla komponentów złożenia." & vbCrLf & _
+        "Folder: " & OutFolder & vbCrLf & vbCrLf & _
+        "Kontynuować?", _
+        "Miniatury JPG", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+
+    If ans = DialogResult.No Then Exit Sub
+
+    Dim overwriteAnswer As DialogResult
+    overwriteAnswer = MessageBox.Show( _
+        "Nadpisać istniejące miniatury?" & vbCrLf & vbCrLf & _
+        "TAK = twórz wszystkie od nowa" & vbCrLf & _
+        "NIE = twórz tylko brakujące", _
+        "Miniatury", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+
+    OverwriteExisting = (overwriteAnswer = DialogResult.Yes)
+
+    If Not System.IO.Directory.Exists(OutFolder) Then
+        System.IO.Directory.CreateDirectory(OutFolder)
+    End If
+
+    CurrentColorScheme = ThisApplication.ActiveColorScheme.Name
+    CurrentBackgroundType = ThisApplication.ColorSchemes.BackgroundType
+    ChangeToWhiteBackground()
+	HideAuxiliaryGeometryForActiveDoc()
+
+    Dim asmNameNoExt As String
+    asmNameNoExt = System.IO.Path.GetFileNameWithoutExtension(asmDoc.FullFileName)
+
+    Dim asmThumb As String
+    asmThumb = GetThumbNameForDoc_NoBarcodeForTK(asmDoc, asmNameNoExt)
+
+    If OverwriteExisting OrElse Not System.IO.File.Exists(OutFolder & "\" & asmThumb) Then
+        SetDefaultLightingForActiveDoc()
+        ThisApplication.CommandManager.ControlDefinitions.Item("AppViewCubeHomeCmd").Execute
+        ThisApplication.ActiveView.SaveAsBitmap(OutFolder & "\" & asmThumb, 500, 500)
+    End If
+
+    ThumbMap = New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.InvariantCultureIgnoreCase)
+    BuildThumbMapFromAssembly_NoBarcodeForTK(asmDoc)
+
+    If Not OverwriteExisting Then
+        ExistingFiles = BuildExistingJpgFileSet(OutFolder)
+        FilterOutExistingThumbnails()
+    End If
+	
+	WriteThumbListToFile() 
+	
+    Dim thumb As String
+    For Each thumb In ThumbMap.Keys
+        SaveThumbnailFromFile(ThumbMap(thumb), thumb)
+        asmDoc.Activate()
+    Next
+
+    RestoreBackground(CurrentColorScheme, CurrentBackgroundType)
+
+    MessageBox.Show("Gotowe. Miniatury zapisane w:" & vbCrLf & OutFolder, "iLogic")
+    Shell("explorer.exe " & OutFolder, vbNormalFocus)
+
+End Sub
+
+
+Dim OutFolder As String = "R:\Miniatury"
+Dim OverwriteExisting As Boolean
+Dim CurrentColorScheme As String
+Dim CurrentBackgroundType As String
+Dim ThumbMap As System.Collections.Generic.Dictionary(Of String, String)
+Dim ExistingFiles As System.Collections.Generic.HashSet(Of String)
+
+Dim fastenerKeywords() As String = { _
+    "DIN 128", "DIN 6912", "DIN 931", "DIN 603", "DIN 315", "ISO 7093", "BS 4168", "DIN6334", "ISO 2338", _
+    "Nitonakr", "ISO 8678", "ISO 7049", "ISO 7089", "DIN 912", "ISO 4032", "ISO 4035", "ISO 4762", _
+    "ISO 10511", "ISO 10642", "ISO 4017", "DIN 934", "ISO 7380-1", "DIN 985", "DIN 7984", "DIN 125", _
+    "DIN 127", "DIN 126", "DIN 1587", "DIN 439", "DIN 7991", "DIN 9021", "DIN 913", "DIN 915", "DIN 933" _
+}
+
+
+Sub BuildThumbMapFromAssembly_NoBarcodeForTK(asm As AssemblyDocument)
+
+    Dim d As Document
+    For Each d In asm.AllReferencedDocuments
+
+        Dim fullPath As String
+        fullPath = ""
+        On Error Resume Next
+        fullPath = d.FullDocumentName
+        On Error GoTo 0
+        If fullPath = "" Then Continue For
+
+        If IsFastenerPath(fullPath) Then Continue For
+
+        Dim nameNoExt As String
+        nameNoExt = System.IO.Path.GetFileNameWithoutExtension(fullPath)
+
+        ' TK: tylko miniatura po 9 znakach, NIE czytamy kodu kreskowego
+        If Left(nameNoExt, 3) = "TK " Then
+            AddThumb(Left(nameNoExt, 9) & ".jpg", fullPath)
+            Continue For
+        End If
+
+        ' NIE TK: sprawdzamy tylko kod kreskowy (13 znaków)
+        Dim kod As String
+        kod = GetTrimmedBarcode13(d)
+        If kod <> "" Then
+            AddThumb(kod & ".jpg", fullPath)
+        End If
+
+    Next
+
+End Sub
+
+
+Function IsFastenerPath(fullPath As String) As Boolean
+
+    If fullPath Is Nothing OrElse fullPath = "" Then
+        IsFastenerPath = False
+        Exit Function
+    End If
+
+    Dim up As String
+    up = UCase(fullPath)
+
+    Dim i As Integer
+    For i = LBound(fastenerKeywords) To UBound(fastenerKeywords)
+        If InStr(1, up, UCase(fastenerKeywords(i)), vbTextCompare) > 0 Then
+            IsFastenerPath = True
+            Exit Function
+        End If
+    Next
+
+    IsFastenerPath = False
+
+End Function
+
+
+Sub AddThumb(thumbName As String, fullPath As String)
+    If thumbName Is Nothing OrElse thumbName = "" Then Exit Sub
+    If fullPath Is Nothing OrElse fullPath = "" Then Exit Sub
+
+    If Not ThumbMap.ContainsKey(thumbName) Then
+        ThumbMap.Add(thumbName, fullPath)
+    End If
+End Sub
+
+
+Function GetTrimmedBarcode13(d As Document) As String
+
+    Dim kod As String
+    kod = ""
+
+    On Error Resume Next
+    kod = iProperties.Value(System.IO.Path.GetFileName(d.FullFileName), "Custom", "Kod Kreskowy")
+    On Error GoTo 0
+
+    kod = Trim(kod)
+
+    If Len(kod) = 13 Then
+        GetTrimmedBarcode13 = kod
+    Else
+        GetTrimmedBarcode13 = ""
+    End If
+
+End Function
+
+
+Function GetThumbNameForDoc_NoBarcodeForTK(d As Document, nameNoExt As String) As String
+
+    If Left(nameNoExt, 3) = "TK " Then
+        GetThumbNameForDoc_NoBarcodeForTK = Left(nameNoExt, 9) & ".jpg"
+        Exit Function
+    End If
+
+    Dim kod As String
+    kod = GetTrimmedBarcode13(d)
+    If kod <> "" Then
+        GetThumbNameForDoc_NoBarcodeForTK = kod & ".jpg"
+        Exit Function
+    End If
+
+    GetThumbNameForDoc_NoBarcodeForTK = nameNoExt & ".jpg"
+
+End Function
+
+
+Function BuildExistingJpgFileSet(folderPath As String) As System.Collections.Generic.HashSet(Of String)
+
+    Dim hs As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.InvariantCultureIgnoreCase)
+
+    On Error Resume Next
+    Dim f As String
+    For Each f In System.IO.Directory.EnumerateFiles(folderPath, "*.jpg")
+        hs.Add(System.IO.Path.GetFileName(f))
+    Next
+    On Error GoTo 0
+
+    Return hs
+
+End Function
+
+Sub WriteThumbListToFile()
+
+    If ThumbMap Is Nothing OrElse ThumbMap.Count = 0 Then Exit Sub
+
+    Dim logPath As String
+    logPath = OutFolder & "\_lista_miniatur.txt"
+
+    Dim sw As Object
+    sw = CreateObject("Scripting.FileSystemObject").CreateTextFile(logPath, True, True)
+
+    Dim thumb As String
+    For Each thumb In ThumbMap.Keys
+        sw.WriteLine(thumb & " | " & ThumbMap(thumb))
+    Next
+
+    sw.Close()
+
+End Sub
+
+
+Sub FilterOutExistingThumbnails()
+
+    If ExistingFiles Is Nothing Then Exit Sub
+    If ThumbMap Is Nothing Then Exit Sub
+    If ThumbMap.Count = 0 Then Exit Sub
+
+    Dim toRemove As New System.Collections.Generic.List(Of String)
+
+    Dim t As String
+    For Each t In ThumbMap.Keys
+        If ExistingFiles.Contains(t) Then
+            toRemove.Add(t)
+        End If
+    Next
+
+    Dim k As String
+    For Each k In toRemove
+        ThumbMap.Remove(k)
+    Next
+
+End Sub
+
+
+Sub SaveThumbnailFromFile(fullPath As String, thumbName As String)
+
+    Dim openedDoc As Document
+    openedDoc = Nothing
+
+    On Error Resume Next
+
+    openedDoc = ThisApplication.Documents.Open(fullPath, True)
+    If openedDoc Is Nothing Then GoTo Cleanup
+
+    SetDefaultLightingForActiveDoc()
+	HideAuxiliaryGeometryForActiveDoc()
+    ThisApplication.CommandManager.ControlDefinitions.Item("AppViewCubeHomeCmd").Execute
+    ThisApplication.ActiveView.SaveAsBitmap(OutFolder & "\" & thumbName, 500, 500)
+
+Cleanup:
+    If Not openedDoc Is Nothing Then
+        openedDoc.Close(True)
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
+
+Sub ChangeToWhiteBackground()
+    ThisApplication.ColorSchemes("Prezentacja").Activate()
+    ThisApplication.ColorSchemes.BackgroundType = 52737
+End Sub
+
+
+Sub RestoreBackground(colorSchemeName As String, backgroundType As String)
+    On Error Resume Next
+    ThisApplication.ColorSchemes(colorSchemeName).Activate()
+    ThisApplication.ColorSchemes.BackgroundType = backgroundType
+    On Error GoTo 0
+End Sub
+
+
+Sub SetDefaultLightingForActiveDoc()
+
+    On Error Resume Next
+
+    Dim d As Document
+    d = ThisApplication.ActiveDocument
+
+    If d.DocumentType = kAssemblyDocumentObject Then
+        CType(d, AssemblyDocument).ActiveLightingStyle = _
+            CType(d, AssemblyDocument).LightingStyles.Item("Oświetlenie domyślne")
+
+    ElseIf d.DocumentType = kPartDocumentObject Then
+        CType(d, PartDocument).ActiveLightingStyle = _
+            CType(d, PartDocument).LightingStyles.Item("Oświetlenie domyślne")
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
+Sub HideAuxiliaryGeometryForActiveDoc()
+
+    On Error Resume Next
+
+    Dim doc As Document
+    doc = ThisApplication.ActiveDocument
+
+    Dim vis As Object
+    vis = doc.ObjectVisibility
+
+    ' wspólne dla części i złożenia
+    vis.AllWorkFeatures = False
+    vis.ConstructionSurfaces = False
+    vis.Sketches = False
+    vis.Sketches3D = False
+    vis.SketchDimensions = False
+    vis.Annotations3D = False
+
+    ' tylko dla złożenia
+    If doc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+        vis.ComponentAnnotations3D = False
+        vis.Welds = False
+        vis.WeldmentSymbols = False
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
