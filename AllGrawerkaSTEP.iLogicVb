@@ -1,231 +1,1628 @@
 Sub Main()
 
-    'Pre Rule Checks
+    ' ================= KONTROLA STARTOWA =================
+
     If ThisApplication.ActiveDocument.DocumentType <> kAssemblyDocumentObject Then
-        MessageBox.Show("Proszę uruchomić tę regułę z pliku złożenia.", "iLogic")
-        Exit Sub
-    End If
-    '/Pre Rule Checks
-
-    RUsure = MessageBox.Show( _
-        "Spowoduje to utworzenie pliku STEP dla wszystkich komponentów złożenia, które są kształtownikiem" _
-        & vbLf & "To makro zakłada, że plik części jest zapisany." _
-        & vbLf & " " _
-        & vbLf & "Czy na pewno chcesz utworzyć plik STEP dla wszystkich komponentów złożenia?" _
-        & vbLf & "To może potrwać chwilę.", "iLogic - Export wszystkich plików STEP", MessageBoxButtons.YesNo)
-
-    If RUsure = vbNo Then
-        MakeSTEP = False
-    Else
-        MakeSTEP = True
-    End If
-
-    If MakeSTEP = False Then
+        MessageBox.Show( _
+            "Proszę uruchomić tę regułę z pliku złożenia.", _
+            "iLogic")
         Exit Sub
     End If
 
-    Dim oAsmDoc As AssemblyDocument = ThisApplication.ActiveDocument
-    Dim oAssyDef As AssemblyComponentDefinition = oAsmDoc.ComponentDefinition
-    oAsmPathAndName = Left(oAsmDoc.FullFileName, Len(oAsmDoc.FullFileName) - 4)
-    oAsmDisplayName = System.IO.Path.GetFileNameWithoutExtension(oAsmDoc.FullFileName)
-    oPath = ThisDoc.Path
 
-    oFolder = "C:\TkMatik\DXF\" & oAsmDisplayName & ""
-    If Not System.IO.Directory.Exists(oFolder) Then
-        System.IO.Directory.CreateDirectory(oFolder)
+    Dim result As DialogResult
+
+    result = MessageBox.Show( _
+        "Makro utworzy pliki STEP dla profili." _
+        & vbLf _
+        & "Położenie numeru będzie kontrolowane na podstawie objętości wycięcia." _
+        & vbLf _
+        & "Maksymalnie 6 prób na jeden profil." _
+        & vbLf & vbLf _
+        & "Kontynuować?", _
+        "iLogic - Export STEP", _
+        MessageBoxButtons.YesNo)
+
+    If result = vbNo Then
+        Exit Sub
     End If
-    ' ensure subfolder exists
-    If Not System.IO.Directory.Exists(oFolder & "\STEPs\Profile") Then
-        System.IO.Directory.CreateDirectory(oFolder & "\STEPs\Profile")
+
+
+    Dim assemblyDoc As AssemblyDocument = _
+        ThisApplication.ActiveDocument
+
+
+    Dim assemblyName As String = _
+        System.IO.Path.GetFileNameWithoutExtension( _
+            assemblyDoc.FullFileName)
+
+
+    ' ================= FOLDERY =================
+
+    outputFolder = _
+        "C:\TkMatik\DXF\" & assemblyName
+
+
+    If Not System.IO.Directory.Exists(outputFolder) Then
+        System.IO.Directory.CreateDirectory(outputFolder)
     End If
 
-    Dim oOccsEnum As ComponentOccurrencesEnumerator = oAsmDoc.ComponentDefinition.Occurrences.AllLeafOccurrences
-    Call ProcessLeafOccs(oOccsEnum)
 
-    MessageBox.Show("Nowe pliki utworzone w: " & vbLf & oFolder, "iLogic")
-    Shell("explorer.exe " & oFolder, vbNormalFocus)
-End Sub
+    stepFolder = _
+        outputFolder & "\STEPs\Profile"
 
-Dim oFolder As String
-Dim oContext As TranslationContext
-Dim oOptions As NameValueMap
-Dim oDatamedium As DataMedium
-Dim oPDFAddIn As TranslatorAddIn
-Dim MakeSTEP As Boolean
 
-Sub ProcessLeafOccs(oOccs As ComponentOccurrencesEnumerator)
-    For Each oOcc As ComponentOccurrence In oOccs
-        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kPartDocumentObject Then
-            If oOcc.Visible = True And oOcc.Suppressed = False Then
-                DXFsave(oOcc, "Parts only")
-            End If
-        End If
-    Next
-End Sub
+    If Not System.IO.Directory.Exists(stepFolder) Then
+        System.IO.Directory.CreateDirectory(stepFolder)
+    End If
 
-Sub DXFsave(oOcc As ComponentOccurrence, sTargetfolder As String)
-    Dim oOccCompDef As ComponentDefinition = oOcc.Definition
-    Dim oApp As Inventor.Application = ThisApplication
 
-    Dim oFileName As String
-    Dim oFullFileName As String
-    Dim iptPathName As String
-    Dim oPN As String
-    Dim UserName As String
-    Dim oDisplayName As String
+    logFile = _
+        stepFolder & "\ExportLog.txt"
 
-    oFileName = System.IO.Path.GetFileNameWithoutExtension(oOccCompDef.Document.FullFileName)
-    oFullFileName = System.IO.Path.GetFileName(oOccCompDef.Document.FullFileName)
-    iptPathName = oOccCompDef.Document.FullDocumentName
-    oPN = ThisDoc.FileName(False)
 
-    ' Открываем ОДИН раз как PartDocument, невидимо
-    Dim oDoc As PartDocument = Nothing
-    oDoc = oApp.Documents.Open(iptPathName, False) ' not visible
+    Try
+        System.IO.File.WriteAllText(logFile, "")
+    Catch
+    End Try
 
-    ' --- отныне работаем только с oDoc ---
-    Dim oType As String
-    oType = oDoc.DocumentSubType.DocumentSubTypeID
 
-    Dim CustomPropertySet As PropertySet
-    CustomPropertySet = oDoc.PropertySets.Item("Inventor User Defined Properties")
+    WriteLog("==============================================")
+    WriteLog("EXPORT STEP")
+    WriteLog("Data: " & Now.ToString("yyyy-MM-dd HH:mm:ss"))
+    WriteLog("Złożenie: " & assemblyDoc.FullFileName)
+    WriteLog("Kontrola: OBJĘTOŚĆ WYCIĘCIA")
+    WriteLog("Tolerancja: ±2%")
+    WriteLog("Maksymalna liczba prób: 6")
+    WriteLog("Przesunięcie między próbami: 10 mm")
+    WriteLog("Głębokość wycięcia: 0.02 mm")
+    WriteLog("==============================================")
+    WriteLog("")
 
-    ' sprawdzamy, czy model bazowy jest konstrukcją blachową
-    Dim propmat As String
-    propmat = oDoc.ComponentDefinition.Material.Name
-    Dim Stoknum As String = iProperties.Value(oFullFileName, "Project", "Stock Number")
 
-    If oDoc.DocumentInterests.HasInterest("{AC211AE0-A7A5-4589-916D-81C529DA6D17}") = True Then
-        UserName = ThisApplication.GeneralOptions.UserName
+    ' ============================================================
+    ' FAZA 1 - ZBIERANIE PROFILI
+    ' ============================================================
 
-        Dim oData As DataMedium
-        oData = ThisApplication.TransientObjects.CreateDataMedium
-        oData.FileName = oFolder & "\STEPs\Profile\" & Left(oFileName, 9) & ".stp"
+    Dim candidates As New List(Of CandidatePart)
 
-        If Not (System.IO.File.Exists(oData.FileName)) Then
 
-            Dim oSTEPTranslator As TranslatorAddIn
-            oSTEPTranslator = ThisApplication.ApplicationAddIns.ItemById("{90AF7F40-0C01-11D5-8E83-0010B541CD80}")
+    Dim occurrences As ComponentOccurrencesEnumerator = _
+        assemblyDoc.ComponentDefinition.Occurrences.AllLeafOccurrences
 
-            oContext = ThisApplication.TransientObjects.CreateTranslationContext
-            oOptions = ThisApplication.TransientObjects.CreateNameValueMap
 
-            oDisplayName = oDoc.DisplayName
-            If oDisplayName <> "Reference Skeleton" Then
+    CollectCandidates( _
+        occurrences, _
+        candidates)
 
-                Dim partDef As PartComponentDefinition = oDoc.ComponentDefinition
-                Dim params As Parameters = partDef.Parameters
 
-                Dim GW As Double
-                Dim GOFF As Double
-				Dim GH As Double
-                ' Параметры читаем ИЗ oDoc
-                Try
-                    GW = CDbl(params.Item("G_W").Value)
-                    GOFF = CDbl(params.Item("G_OFFSET_START").Value)
-					GH = CDbl(params.Item("G_H").Value)
-                Catch
-                    ' нет параметров — закрыть и выйти
-                    oDoc.Close(False)
-                    Exit Sub
-                End Try
-				
-                ' если твои параметры уже в мм — без конверта
-                Dim GW_mm As Double = GW
-                Dim GOFF_mm As Double = GOFF
+    WriteLog( _
+        "Znaleziono profili: " & _
+        candidates.Count)
 
-                Dim oOffset As Double = GW_mm / 2
-                Dim oOffsetStart As Double = GOFF_mm
-                If oOffsetStart < 0 Then
-                    oOffsetStart = Math.Abs(oOffsetStart)
-                End If
 
-                ' Рабочие плоскости берем из ЭТОГО документа
-                Dim oCompDef As ComponentDefinition = partDef
+    If candidates.Count = 0 Then
 
-                Dim oBasePlane As WorkPlane
-                Try
-                    oBasePlane = oCompDef.WorkPlanes.Item("Płaszczyzna YZ")
-                Catch
-                    oBasePlane = oCompDef.WorkPlanes.Item(3) ' 1=XY, 2=XZ, 3=YZ
-                End Try
+        MessageBox.Show( _
+            "Nie znaleziono profili.", _
+            "iLogic")
 
-                Dim oNewPlane As WorkPlane
-                oNewPlane = oCompDef.WorkPlanes.AddByPlaneAndOffset(oBasePlane, oOffset)
-                oNewPlane.Visible = False
+        Exit Sub
 
-                Dim oSketch As PlanarSketch
-                oSketch = oCompDef.Sketches.Add(oNewPlane)
-                oSketch.Edit()
+    End If
 
-                Dim oTG As TransientGeometry = ThisApplication.TransientGeometry
-				Dim oPoint As Point2d
-				
-				If GH > 3 Then
-                	oPoint = oTG.CreatePoint2d(-1.2, oOffsetStart + 1)
-				Else
-					oPoint = oTG.CreatePoint2d(-0.8, oOffsetStart + 1)
-				End If	
-				
-                Dim oSketchText As Inventor.TextBox
-				
-				If GH > 3 Then
-                	oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Left(oFileName, 9))
-				Else
-					oSketchText = oSketch.TextBoxes.AddFitted(oPoint, Mid(oFileName, 4, 6))
-				End If
 
-                oSketch.ExitEdit()
-                InventorVb.DocumentUpdate()
+    ' ============================================================
+    ' FAZA 2 - ISTNIEJĄCE STEP
+    ' ============================================================
 
-                ' Профиль из всего эскиза
-                Dim oProf As Profile
-                Try
-                    oProf = oSketch.Profiles.AddForSolid(False)
-                Catch
-                    oDoc.Close(False)
-                    Exit Sub
-                End Try
+    Dim toExport As New List(Of CandidatePart)
+    Dim skippedNames As New List(Of String)
 
-                ' Вырез
-                Dim uom As UnitsOfMeasure = oDoc.UnitsOfMeasure
-                Dim thicknessMM As Double = 0.02
-                Dim thickness As Double = uom.ConvertUnits(thicknessMM, UnitsTypeEnum.kMillimeterLengthUnits, uom.LengthUnits)
 
-                Dim op As PartFeatureOperationEnum = PartFeatureOperationEnum.kCutOperation
+    For Each candidate As CandidatePart In candidates
 
-                Dim oExtDef As ExtrudeDefinition
-                oExtDef = partDef.Features.ExtrudeFeatures.CreateExtrudeDefinition(oProf, op)
-                oExtDef.SetDistanceExtent(thickness, PartFeatureExtentDirectionEnum.kNegativeExtentDirection)
+        If System.IO.File.Exists( _
+            candidate.TargetStepPath) Then
 
-                Dim oExtrude As ExtrudeFeature
-                oExtrude = partDef.Features.ExtrudeFeatures.Add(oExtDef)
-
-                ' Экспорт STEP
-                If oSTEPTranslator.HasSaveCopyAsOptions(oDoc, oContext, oOptions) Then
-                    oOptions.Value("ApplicationProtocolType") = 3
-                    oContext.Type = IOMechanismEnum.kFileBrowseIOMechanism
-                    oSTEPTranslator.SaveCopyAs(oDoc, oContext, oOptions, oData)
-                End If
-
-                ' >>> ОБЯЗАТЕЛЬНО закрываем
-                oDoc.Close(False)
-
-            Else
-                ' Reference Skeleton — просто закрыть
-                oDoc.Close(False)
-            End If
+            skippedNames.Add( _
+                candidate.PartFileName)
 
         Else
-            ' STEP уже есть — закрыть документ и выйти
-            oDoc.Close(False)
-            Exit Sub
+
+            toExport.Add( _
+                candidate)
+
         End If
 
-    Else
-        ' Не blacha — закрыть и выйти
-        oDoc.Close(False)
+    Next
+
+
+    WriteLog("STEP już istnieje: " & skippedNames.Count)
+    WriteLog("Do eksportu: " & toExport.Count)
+    WriteLog("")
+
+
+    If toExport.Count = 0 Then
+
+        MessageBox.Show( _
+            "Wszystkie pliki STEP już istnieją." _
+            & vbLf & vbLf _
+            & "Log:" _
+            & vbLf _
+            & logFile, _
+            "iLogic")
+
         Exit Sub
+
     End If
+
+
+    ' ============================================================
+    ' TRANSLATOR STEP
+    ' ============================================================
+
+    Dim stepTranslator As TranslatorAddIn
+
+    stepTranslator = _
+        ThisApplication.ApplicationAddIns.ItemById( _
+            "{90AF7F40-0C01-11D5-8E83-0010B541CD80}")
+
+
+    ' ============================================================
+    ' EKSPORT
+    ' ============================================================
+
+    Dim exportedCount As Integer = 0
+
+    Dim engravingFailedNames As New List(Of String)
+    Dim otherFailedNames As New List(Of String)
+
+
+    For Each candidate As CandidatePart In toExport
+
+
+        WriteLog("")
+        WriteLog("==============================================")
+        WriteLog("PLIK: " & candidate.PartFileName)
+        WriteLog("==============================================")
+
+
+        Dim failureReason As String = ""
+
+
+        If ExportStep( _
+            candidate, _
+            stepTranslator, _
+            failureReason) Then
+
+
+            exportedCount += 1
+
+            WriteLog("WYNIK: STEP OK")
+
+
+        Else
+
+
+            If failureReason = "ENGRAVING_POSITION" Then
+
+                engravingFailedNames.Add( _
+                    candidate.PartFileName)
+
+            Else
+
+                otherFailedNames.Add( _
+                    candidate.PartFileName & _
+                    " - " & _
+                    failureReason)
+
+            End If
+
+
+            WriteLog( _
+                "WYNIK: BŁĄD - " & _
+                failureReason)
+
+        End If
+
+    Next
+
+
+    ' ============================================================
+    ' PODSUMOWANIE
+    ' ============================================================
+
+    WriteLog("")
+    WriteLog("==============================================")
+    WriteLog("PODSUMOWANIE")
+    WriteLog("==============================================")
+
+    WriteLog("Profile znalezione: " & candidates.Count)
+    WriteLog("STEP już istniały: " & skippedNames.Count)
+    WriteLog("Do eksportu: " & toExport.Count)
+    WriteLog("Wyeksportowano: " & exportedCount)
+
+    WriteLog( _
+        "Nie znaleziono poprawnego miejsca: " & _
+        engravingFailedNames.Count)
+
+    WriteLog( _
+        "Pozostałe błędy: " & _
+        otherFailedNames.Count)
+
+
+    Dim summary As String
+
+
+    summary = _
+        "Znaleziono profili: " & candidates.Count _
+        & vbLf _
+        & "STEP już istniały: " & skippedNames.Count _
+        & vbLf _
+        & "Do eksportu: " & toExport.Count _
+        & vbLf _
+        & "Wyeksportowano: " & exportedCount
+
+
+    If engravingFailedNames.Count > 0 Then
+
+        summary = _
+            summary _
+            & vbLf & vbLf _
+            & "NIE UDAŁO SIĘ UMIEŚCIĆ NUMERU:" _
+            & vbLf _
+            & String.Join( _
+                vbLf, _
+                engravingFailedNames.ToArray())
+
+    End If
+
+
+    If otherFailedNames.Count > 0 Then
+
+        summary = _
+            summary _
+            & vbLf & vbLf _
+            & "POZOSTAŁE BŁĘDY:" _
+            & vbLf _
+            & String.Join( _
+                vbLf, _
+                otherFailedNames.ToArray())
+
+    End If
+
+
+    summary = _
+        summary _
+        & vbLf & vbLf _
+        & "Log:" _
+        & vbLf _
+        & logFile
+
+
+    MessageBox.Show( _
+        summary, _
+        "iLogic - Export STEP")
+
+
+    Shell( _
+        "explorer.exe """ & stepFolder & """", _
+        vbNormalFocus)
+
+End Sub
+
+
+
+' ============================================================
+' GLOBALNE
+' ============================================================
+
+Dim outputFolder As String
+Dim stepFolder As String
+Dim logFile As String
+
+
+
+' ============================================================
+' KLASA KANDYDATA
+' ============================================================
+
+Class CandidatePart
+
+    Public iptPathName As String
+    Public PartFileName As String
+    Public TargetStepPath As String
+
+    Public GW As Double
+    Public GOFFSET As Double
+    Public GH As Double
+
+End Class
+
+
+
+' ============================================================
+' LOG
+' ============================================================
+
+Sub WriteLog(Text As String)
+
+    Try
+
+        System.IO.File.AppendAllText( _
+            logFile, _
+            text & System.Environment.NewLine)
+
+    Catch
+    End Try
+
+End Sub
+
+
+
+' ============================================================
+' ZBIERANIE PROFILI
+' ============================================================
+
+Sub CollectCandidates( _
+    occurrences As ComponentOccurrencesEnumerator, _
+    candidates As List(Of CandidatePart))
+
+
+    For Each occurrence As ComponentOccurrence In occurrences
+
+        Try
+
+            If occurrence.DefinitionDocumentType = _
+                DocumentTypeEnum.kPartDocumentObject Then
+
+
+                If IsOccurrenceUsable(occurrence) Then
+
+                    TryAddCandidate( _
+                        occurrence, _
+                        candidates)
+
+                End If
+
+            End If
+
+
+        Catch ex As Exception
+
+            Dim occurrenceName As String = _
+                "UNKNOWN"
+
+            Try
+                occurrenceName = occurrence.Name
+            Catch
+            End Try
+
+
+            WriteLog( _
+                "Pominięto occurrence: " _
+                & occurrenceName _
+                & " | " _
+                & ex.Message)
+
+        End Try
+
+    Next
+
+End Sub
+
+
+
+' ============================================================
+' BEZPIECZNE SPRAWDZENIE OCCURRENCE
+' ============================================================
+
+Function IsOccurrenceUsable( _
+    occurrence As ComponentOccurrence) As Boolean
+
+
+    Try
+
+        If occurrence.Suppressed = True Then
+            Return False
+        End If
+
+
+        If occurrence.Visible = False Then
+            Return False
+        End If
+
+
+        Return True
+
+
+    Catch ex As Exception
+
+        Dim occurrenceName As String = _
+            "UNKNOWN"
+
+
+        Try
+            occurrenceName = occurrence.Name
+        Catch
+        End Try
+
+
+        WriteLog( _
+            "Pominięto occurrence - błąd Visible/Suppressed: " _
+            & occurrenceName _
+            & " | " _
+            & ex.Message)
+
+
+        Return False
+
+    End Try
+
+End Function
+
+
+
+' ============================================================
+' DODAWANIE KANDYDATA
+' ============================================================
+
+Sub TryAddCandidate( _
+    occurrence As ComponentOccurrence, _
+    candidates As List(Of CandidatePart))
+
+
+    Dim componentDefinition As ComponentDefinition = _
+        occurrence.Definition
+
+
+    Dim iptPathName As String = _
+        componentDefinition.Document.FullDocumentName
+
+
+    Dim fileName As String = _
+        System.IO.Path.GetFileNameWithoutExtension( _
+            iptPathName)
+
+
+    ' Nie dodajemy tego samego IPT kilka razy
+    For Each existing As CandidatePart In candidates
+
+        If String.Equals( _
+            existing.iptPathName, _
+            iptPathName, _
+            StringComparison.OrdinalIgnoreCase) Then
+
+            Exit Sub
+
+        End If
+
+    Next
+
+
+    Dim partDoc As PartDocument = _
+        Nothing
+
+
+    Try
+
+        partDoc = _
+            ThisApplication.Documents.Open( _
+                iptPathName, _
+                False)
+
+
+        ' Kształtownik
+        If partDoc.DocumentInterests.HasInterest( _
+            "{AC211AE0-A7A5-4589-916D-81C529DA6D17}") <> True Then
+
+            Exit Sub
+
+        End If
+
+
+        If partDoc.DisplayName = _
+            "Reference Skeleton" Then
+
+            Exit Sub
+
+        End If
+
+
+        Dim partDef As PartComponentDefinition = _
+            partDoc.ComponentDefinition
+
+
+        Dim parameters As Parameters = _
+            partDef.Parameters
+
+
+        Dim GW As Double
+        Dim GOFFSET As Double
+        Dim GH As Double
+
+
+        Try
+
+            GW = _
+                CDbl( _
+                    parameters.Item("G_W").Value)
+
+            GOFFSET = _
+                CDbl( _
+                    parameters.Item("G_OFFSET_START").Value)
+
+            GH = _
+                CDbl( _
+                    parameters.Item("G_H").Value)
+
+        Catch
+
+            Exit Sub
+
+        End Try
+
+
+        Dim candidate As New CandidatePart
+
+
+        candidate.iptPathName = _
+            iptPathName
+
+
+        candidate.PartFileName = _
+            fileName
+
+
+        candidate.TargetStepPath = _
+            stepFolder & "\" & _
+            Left(fileName, 9) & _
+            ".stp"
+
+
+        candidate.GW = GW
+        candidate.GOFFSET = GOFFSET
+        candidate.GH = GH
+
+
+        candidates.Add(candidate)
+
+
+    Catch ex As Exception
+
+        WriteLog( _
+            "Błąd odczytu kandydata: " _
+            & fileName _
+            & " | " _
+            & ex.Message)
+
+
+    Finally
+
+        If Not partDoc Is Nothing Then
+
+            Try
+                partDoc.Close(False)
+            Catch
+            End Try
+
+        End If
+
+    End Try
+
+End Sub
+
+
+
+' ============================================================
+' EKSPORT JEDNEGO PROFILU
+' ============================================================
+
+Function ExportStep( _
+    candidate As CandidatePart, _
+    stepTranslator As TranslatorAddIn, _
+    ByRef failureReason As String) As Boolean
+
+
+    failureReason = ""
+
+
+    Dim partDoc As PartDocument = _
+        Nothing
+
+
+    Try
+
+        partDoc = _
+            ThisApplication.Documents.Open( _
+                candidate.iptPathName, _
+                False)
+
+
+        Dim partDef As PartComponentDefinition = _
+            partDoc.ComponentDefinition
+
+
+        Dim units As UnitsOfMeasure = _
+            partDoc.UnitsOfMeasure
+
+
+        ' ========================================================
+        ' BRYŁA
+        ' ========================================================
+
+        If partDef.SurfaceBodies.Count = 0 Then
+
+            failureReason = _
+                "NO_SOLID_BODY"
+
+            Return False
+
+        End If
+
+
+        If partDef.SurfaceBodies.Item(1).IsSolid = False Then
+
+            failureReason = _
+                "NO_SOLID_BODY"
+
+            Return False
+
+        End If
+
+
+        ' ========================================================
+        ' TEKST
+        ' ========================================================
+
+        Dim engravingText As String
+        Dim textX As Double
+
+
+        If candidate.GH > 3 Then
+
+            ' Profil > 30 mm
+            engravingText = _
+                Left( _
+                    candidate.PartFileName, _
+                    9)
+
+            textX = _
+                -1.2
+
+        Else
+
+            ' Profil <= 30 mm
+            ' Bez "TK "
+            engravingText = _
+                Mid( _
+                    candidate.PartFileName, _
+                    4, _
+                    6)
+
+            textX = _
+                -0.8
+
+        End If
+
+
+        WriteLog( _
+            "Napis: " & _
+            engravingText)
+
+
+        ' ========================================================
+        ' OCZEKIWANA OBJĘTOŚĆ Z TABELI
+        ' ========================================================
+
+        Dim expectedVolumeMM3 As Double
+
+
+        expectedVolumeMM3 = _
+            CalculateExpectedVolume( _
+                engravingText)
+
+
+        If expectedVolumeMM3 <= 0 Then
+
+            failureReason = _
+                "UNKNOWN_CHARACTER"
+
+            Return False
+
+        End If
+
+
+        Dim minVolumeMM3 As Double = _
+            expectedVolumeMM3 * 0.98
+
+
+        Dim maxVolumeMM3 As Double = _
+            expectedVolumeMM3 * 1.02
+
+
+        WriteLog( _
+            "Oczekiwana objętość wycięcia: " & _
+            expectedVolumeMM3.ToString("0.000000000") & _
+            " mm3")
+
+
+        WriteLog( _
+            "Zakres ±2%: " & _
+            minVolumeMM3.ToString("0.000000000") & _
+            " ... " & _
+            maxVolumeMM3.ToString("0.000000000") & _
+            " mm3")
+
+
+        ' ========================================================
+        ' PŁASZCZYZNA
+        ' ========================================================
+
+        Dim basePlane As WorkPlane
+
+
+        Try
+
+            basePlane = _
+                partDef.WorkPlanes.Item( _
+                    "Płaszczyzna YZ")
+
+        Catch
+
+            basePlane = _
+                partDef.WorkPlanes.Item(3)
+
+        End Try
+
+
+        Dim engravingPlane As WorkPlane
+
+
+        engravingPlane = _
+            partDef.WorkPlanes.AddByPlaneAndOffset( _
+                basePlane, _
+                candidate.GW / 2)
+
+
+        engravingPlane.Visible = _
+            False
+
+
+        ' ========================================================
+        ' GRANICE PROFILU
+        ' ========================================================
+
+        Dim boundsSketch As PlanarSketch = _
+            partDef.Sketches.Add( _
+                engravingPlane)
+
+
+        Dim minY As Double
+        Dim maxY As Double
+
+
+        GetPartSketchYBounds( _
+            partDef, _
+            boundsSketch, _
+            minY, _
+            maxY)
+
+
+        Try
+            boundsSketch.Delete()
+        Catch
+        End Try
+
+
+        WriteLog( _
+            "Zakres Y profilu: " & _
+            (minY * 10).ToString("0.0") & _
+            " ... " & _
+            (maxY * 10).ToString("0.0") & _
+            " mm")
+
+
+        ' ========================================================
+        ' START
+        ' ========================================================
+
+        Dim offsetStart As Double = _
+            candidate.GOFFSET
+
+
+        If offsetStart < 0 Then
+
+            offsetStart = _
+                Math.Abs(offsetStart)
+
+        End If
+
+
+        ' G_OFFSET_START + 10 mm
+        Dim startY As Double = _
+            offsetStart + 1
+
+
+        ' 10 mm
+        Dim moveStep As Double = _
+            3.0
+
+
+        ' Maksymalnie 6 prób
+        Dim maxAttempts As Integer = _
+            6
+
+
+        Dim engravingFound As Boolean = _
+            False
+
+
+        ' ========================================================
+        ' GŁĘBOKOŚĆ 0.02 mm
+        ' ========================================================
+
+        Dim thickness As Double
+
+
+        thickness = _
+            units.ConvertUnits( _
+                0.02, _
+                UnitsTypeEnum.kMillimeterLengthUnits, _
+                UnitsTypeEnum.kDatabaseLengthUnits)
+
+
+        ' ========================================================
+        ' TRANSIENT BREP
+        ' ========================================================
+
+        Dim transientBRep As TransientBRep = _
+            ThisApplication.TransientBRep
+
+
+        ' ========================================================
+        ' MAKSYMALNIE 6 PRÓB
+        ' ========================================================
+
+        For attempt As Integer = 0 To maxAttempts - 1
+
+
+            Dim currentY As Double = _
+                startY + _
+                (attempt * moveStep)
+
+
+            WriteLog("")
+            WriteLog( _
+                "Próba " & _
+                (attempt + 1) & _
+                "/6")
+
+
+            WriteLog( _
+                "Pozycja Y: " & _
+                (currentY * 10).ToString("0.0") & _
+                " mm")
+
+
+            Dim sketch As PlanarSketch = _
+                Nothing
+
+
+            Dim extrude As ExtrudeFeature = _
+                Nothing
+
+
+            Try
+
+                ' =================================================
+                ' SZKIC
+                ' =================================================
+
+                sketch = _
+                    partDef.Sketches.Add( _
+                        engravingPlane)
+
+
+                sketch.Edit()
+
+
+                Dim geometry As TransientGeometry = _
+                    ThisApplication.TransientGeometry
+
+
+                Dim point As Point2d
+
+
+                point = _
+                    geometry.CreatePoint2d( _
+                        textX, _
+                        currentY)
+
+
+                Dim sketchText As Inventor.TextBox
+
+
+                sketchText = _
+                    sketch.TextBoxes.AddFitted( _
+                        point, _
+                        engravingText)
+
+
+                sketch.ExitEdit()
+
+
+                InventorVb.DocumentUpdate()
+
+
+                ' =================================================
+                ' KONTROLA DŁUGOŚCI
+                ' =================================================
+
+                Dim textRange As Box2d = _
+                    sketchText.RangeBox
+
+
+                If textRange.MaxPoint.Y > maxY Then
+
+                    WriteLog( _
+                        "STOP: napis wychodzi poza koniec profilu.")
+
+
+                    Try
+                        sketch.Delete()
+                    Catch
+                    End Try
+
+
+                    Exit For
+
+                End If
+
+
+                If textRange.MinPoint.Y < minY Then
+
+                    WriteLog( _
+                        "BAD: napis przed początkiem profilu.")
+
+
+                    Try
+                        sketch.Delete()
+                    Catch
+                    End Try
+
+
+                    Continue For
+
+                End If
+
+
+                ' =================================================
+                ' PROFIL TEKSTU
+                ' =================================================
+
+                Dim paths As ObjectCollection
+
+
+                paths = _
+                    ThisApplication.TransientObjects.CreateObjectCollection
+
+
+                paths.Add( _
+                    sketchText)
+
+
+                Dim profile As Profile
+
+
+                profile = _
+                    sketch.Profiles.AddForSolid( _
+                        False, _
+                        paths)
+
+
+                ' =================================================
+                ' BODY BEFORE
+                ' =================================================
+
+                Dim bodyBefore As SurfaceBody
+
+
+                bodyBefore = _
+                    transientBRep.Copy( _
+                        partDef.SurfaceBodies.Item(1))
+
+
+                ' =================================================
+                ' CUT
+                ' =================================================
+
+                Dim extrudeDef As ExtrudeDefinition
+
+
+                extrudeDef = _
+                    partDef.Features.ExtrudeFeatures.CreateExtrudeDefinition( _
+                        profile, _
+                        PartFeatureOperationEnum.kCutOperation)
+
+
+                extrudeDef.SetDistanceExtent( _
+                    thickness, _
+                    PartFeatureExtentDirectionEnum.kNegativeExtentDirection)
+
+
+                extrude = _
+                    partDef.Features.ExtrudeFeatures.Add( _
+                        extrudeDef)
+
+
+                InventorVb.DocumentUpdate()
+
+
+                ' =================================================
+                ' BODY AFTER
+                ' =================================================
+
+                Dim bodyAfter As SurfaceBody
+
+
+                bodyAfter = _
+                    transientBRep.Copy( _
+                        partDef.SurfaceBodies.Item(1))
+
+
+                ' =================================================
+                ' BEFORE - AFTER
+                ' =================================================
+
+                transientBRep.DoBoolean( _
+                    bodyBefore, _
+                    bodyAfter, _
+                    BooleanTypeEnum.kBooleanTypeDifference)
+
+
+                ' =================================================
+                ' FAKTYCZNA OBJĘTOŚĆ
+                ' =================================================
+
+                Dim actualVolumeCm3 As Double
+
+
+                actualVolumeCm3 = _
+                    bodyBefore.Volume(0.001)
+
+
+                Dim actualVolumeMM3 As Double
+
+
+                actualVolumeMM3 = _
+                    actualVolumeCm3 * 1000
+
+
+                Dim percent As Double = _
+                    0
+
+
+                If expectedVolumeMM3 > 0 Then
+
+                    percent = _
+                        (actualVolumeMM3 / expectedVolumeMM3) * 100
+
+                End If
+
+
+                WriteLog( _
+                    "Faktyczna objętość wycięcia: " & _
+                    actualVolumeMM3.ToString("0.000000000") & _
+                    " mm3")
+
+
+                WriteLog( _
+                    "Wycięto: " & _
+                    percent.ToString("0.00") & _
+                    "% oczekiwanej objętości")
+
+
+                ' =================================================
+                ' PORÓWNANIE ±2%
+                ' =================================================
+
+                If actualVolumeMM3 >= minVolumeMM3 And _
+                   actualVolumeMM3 <= maxVolumeMM3 Then
+
+
+                    WriteLog( _
+                        "OK - objętość wycięcia zgodna.")
+
+
+                    engravingFound = _
+                        True
+
+
+                    ' Zostawiamy ten Cut do eksportu STEP
+                    Exit For
+
+
+                Else
+
+
+                    WriteLog( _
+                        "BAD - objętość wycięcia poza zakresem.")
+
+
+                    ' =================================================
+                    ' USUWAMY CUT
+                    ' =================================================
+
+                    Try
+
+                        extrude.Delete( _
+                            True, _
+                            False, _
+                            False)
+
+                    Catch exDelete As Exception
+
+                        WriteLog( _
+                            "Błąd usuwania Extrude: " _
+                            & exDelete.Message)
+
+                    End Try
+
+
+                    InventorVb.DocumentUpdate()
+
+
+                    ' =================================================
+                    ' USUWAMY SZKIC
+                    ' =================================================
+
+                    Try
+
+                        sketch.Delete()
+
+                    Catch exSketch As Exception
+
+                        WriteLog( _
+                            "Błąd usuwania szkicu: " _
+                            & exSketch.Message)
+
+                    End Try
+
+
+                    InventorVb.DocumentUpdate()
+
+                End If
+
+
+            Catch ex As Exception
+
+
+                WriteLog( _
+                    "BŁĄD PRÓBY: " _
+                    & ex.Message)
+
+
+                ' =================================================
+                ' SPRZĄTANIE
+                ' =================================================
+
+                If Not extrude Is Nothing Then
+
+                    Try
+
+                        extrude.Delete( _
+                            True, _
+                            False, _
+                            False)
+
+                    Catch
+                    End Try
+
+                End If
+
+
+                InventorVb.DocumentUpdate()
+
+
+                If Not sketch Is Nothing Then
+
+                    Try
+                        sketch.Delete()
+                    Catch
+                    End Try
+
+                End If
+
+
+                InventorVb.DocumentUpdate()
+
+            End Try
+
+        Next
+
+
+        ' ========================================================
+        ' BRAK POPRAWNEJ POZYCJI
+        ' ========================================================
+
+        If engravingFound = False Then
+
+
+            WriteLog( _
+                "NIEPOWODZENIE: brak poprawnej pozycji po maksymalnie 6 próbach.")
+
+
+            failureReason = _
+                "ENGRAVING_POSITION"
+
+
+            Return False
+
+        End If
+
+
+        ' ========================================================
+        ' STEP
+        ' ========================================================
+
+        WriteLog("")
+        WriteLog("Rozpoczynam eksport STEP...")
+
+
+        Dim context As TranslationContext = _
+            ThisApplication.TransientObjects.CreateTranslationContext
+
+
+        Dim options As NameValueMap = _
+            ThisApplication.TransientObjects.CreateNameValueMap
+
+
+        Dim data As DataMedium = _
+            ThisApplication.TransientObjects.CreateDataMedium
+
+
+        data.FileName = _
+            candidate.TargetStepPath
+
+
+        If stepTranslator.HasSaveCopyAsOptions( _
+            partDoc, _
+            context, _
+            options) Then
+
+
+            options.Value( _
+                "ApplicationProtocolType") = 3
+
+
+            context.Type = _
+                IOMechanismEnum.kFileBrowseIOMechanism
+
+
+            stepTranslator.SaveCopyAs( _
+                partDoc, _
+                context, _
+                options, _
+                data)
+
+
+        Else
+
+            failureReason = _
+                "STEP_OPTIONS"
+
+            Return False
+
+        End If
+
+
+        If System.IO.File.Exists( _
+            candidate.TargetStepPath) Then
+
+
+            WriteLog( _
+                "STEP utworzony: " _
+                & candidate.TargetStepPath)
+
+
+        Else
+
+
+            WriteLog( _
+                "BŁĄD: plik STEP nie został utworzony.")
+
+
+            failureReason = _
+                "STEP_NOT_CREATED"
+
+
+            Return False
+
+        End If
+
+
+        Return True
+
+
+    Catch ex As Exception
+
+
+        WriteLog( _
+            "BŁĄD PLIKU: " _
+            & ex.Message)
+
+
+        failureReason = _
+            "EXCEPTION: " _
+            & ex.Message
+
+
+        Return False
+
+
+    Finally
+
+
+        If Not partDoc Is Nothing Then
+
+            WriteLog( _
+                "Zamykam IPT bez zapisywania.")
+
+
+            Try
+                partDoc.Close(False)
+            Catch
+            End Try
+
+        End If
+
+    End Try
+
+End Function
+
+
+
+' ============================================================
+' OCZEKIWANA OBJĘTOŚĆ NAPISU
+'
+' WARTOŚCI ZMIERZONE DLA:
+' GŁĘBOKOŚĆ = 0.02 mm
+'
+' JEDNOSTKA = mm3
+' ============================================================
+
+Function CalculateExpectedVolume( _
+    engravingText As String) As Double
+
+
+    Dim totalVolume As Double = _
+        0
+
+
+    For index As Integer = 1 To engravingText.Length
+
+
+        Dim currentChar As String
+
+
+        currentChar = _
+            Mid( _
+                engravingText, _
+                index, _
+                1)
+
+
+        Select Case currentChar
+
+
+            Case "T"
+
+                totalVolume += _
+                    0.052010747
+
+
+            Case "K"
+
+                totalVolume += _
+                    0.073566156
+
+
+            Case "0"
+
+                totalVolume += _
+                    0.073477488
+
+
+            Case "1"
+
+                totalVolume += _
+                    0.044933547
+
+
+            Case "2"
+
+                totalVolume += _
+                    0.059689237
+
+
+            Case "3"
+
+                totalVolume += _
+                    0.060441272
+
+
+            Case "4"
+
+                totalVolume += _
+                    0.061405581
+
+
+            Case "5"
+
+                totalVolume += _
+                    0.065209474
+
+
+            Case "6"
+
+                totalVolume += _
+                    0.072337281
+
+
+            Case "7"
+
+                totalVolume += _
+                    0.048194377
+
+
+            Case "8"
+
+                totalVolume += _
+                    0.080714061
+
+
+            Case "9"
+
+                totalVolume += _
+                    0.072577098
+
+
+            Case " "
+
+                ' Spacja = 0
+
+
+            Case Else
+
+                WriteLog( _
+                    "Nieznany znak: " _
+                    & currentChar)
+
+                Return -1
+
+        End Select
+
+    Next
+
+
+    Return totalVolume
+
+End Function
+
+
+
+' ============================================================
+' GRANICE PROFILU W UKŁADZIE SZKICU
+' ============================================================
+
+Sub GetPartSketchYBounds( _
+    partDef As PartComponentDefinition, _
+    sketch As PlanarSketch, _
+    ByRef minY As Double, _
+    ByRef maxY As Double)
+
+
+    Dim rangeBox As Box
+
+
+    Try
+
+        rangeBox = _
+            partDef.PreciseRangeBox
+
+    Catch
+
+        rangeBox = _
+            partDef.RangeBox
+
+    End Try
+
+
+    Dim geometry As TransientGeometry = _
+        ThisApplication.TransientGeometry
+
+
+    Dim points As New List(Of Point)
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MinPoint.X, _
+        rangeBox.MinPoint.Y, _
+        rangeBox.MinPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MinPoint.X, _
+        rangeBox.MinPoint.Y, _
+        rangeBox.MaxPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MinPoint.X, _
+        rangeBox.MaxPoint.Y, _
+        rangeBox.MinPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MinPoint.X, _
+        rangeBox.MaxPoint.Y, _
+        rangeBox.MaxPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MaxPoint.X, _
+        rangeBox.MinPoint.Y, _
+        rangeBox.MinPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MaxPoint.X, _
+        rangeBox.MinPoint.Y, _
+        rangeBox.MaxPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MaxPoint.X, _
+        rangeBox.MaxPoint.Y, _
+        rangeBox.MinPoint.Z))
+
+
+    points.Add(geometry.CreatePoint( _
+        rangeBox.MaxPoint.X, _
+        rangeBox.MaxPoint.Y, _
+        rangeBox.MaxPoint.Z))
+
+
+    minY = _
+        Double.MaxValue
+
+
+    maxY = _
+        Double.MinValue
+
+
+    For Each modelPoint As Point In points
+
+
+        Dim sketchPoint As Point2d
+
+
+        sketchPoint = _
+            sketch.ModelToSketchSpace( _
+                modelPoint)
+
+
+        If sketchPoint.Y < minY Then
+            minY = sketchPoint.Y
+        End If
+
+
+        If sketchPoint.Y > maxY Then
+            maxY = sketchPoint.Y
+        End If
+
+    Next
 
 End Sub
